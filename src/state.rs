@@ -1,7 +1,8 @@
-use crate::{DateTime, Direction, Object, Power, Result, Telegram};
+use crate::{Direction, Object, Power, Result, Telegram};
 
 #[cfg(feature = "serde")]
 use serde::Serialize;
+use time::OffsetDateTime;
 
 /// this name is terrible
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -52,7 +53,8 @@ pub struct Line {
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct State {
-    pub datetime: Option<DateTime>,
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339::option"))]
+    pub datetime: Option<OffsetDateTime>,
     pub energy: Dir,
     pub power: Dir,
     pub lines: [Line; 3],

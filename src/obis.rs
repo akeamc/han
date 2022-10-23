@@ -24,12 +24,13 @@ pub enum Direction {
     FromGrid,
 }
 
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use Direction::*;
 use Power::*;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Object {
-    DateTime(DateTime),
+    DateTime(OffsetDateTime),
     /// Total energy (kWh or kvarh)
     TotalEnergy(Power, Direction, Decimal<8, 3>),
     /// Power of all lines combined (kW or kvar)
@@ -96,7 +97,7 @@ impl FromStr for Object {
         let obis: Obis = obis.parse()?;
 
         match obis {
-            Obis(0, 0, 1, 0, 0) => Ok(Object::DateTime(DateTime::parse(body)?)),
+            Obis(0, 0, 1, 0, 0) => Ok(Object::DateTime(parse_datetime(body)?)),
             Obis(1, 0, c @ 1..=4, d @ 7..=8, 0) => {
                 let (pow, dir) = pow_dir(c)?;
                 match d {
@@ -134,41 +135,41 @@ impl FromStr for Object {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct DateTime {
-    pub year: u8,
-    pub month: u8,
-    pub day: u8,
-    pub hour: u8,
-    pub minute: u8,
-    pub second: u8,
+fn parse_datetime(s: &str) -> Result<OffsetDateTime> {
+    let parsetwo = |i| {
+        s.get(i..=(i + 1))
+            .and_then(|s| s.parse::<u8>().ok())
+            .ok_or(Error::InvalidFormat)
+    };
 
-    pub dst: bool,
-}
+    let year: i32 = i32::from(parsetwo(0)?) + 2000;
+    let month = match s.get(2..4).ok_or(Error::InvalidFormat)? {
+        "01" => Month::January,
+        "02" => Month::February,
+        "03" => Month::March,
+        "04" => Month::April,
+        "05" => Month::May,
+        "06" => Month::June,
+        "07" => Month::July,
+        "08" => Month::August,
+        "09" => Month::September,
+        "10" => Month::October,
+        "11" => Month::November,
+        "12" => Month::December,
+        _ => return Err(Error::InvalidFormat),
+    };
+    let day = parsetwo(4)?;
+    let date = Date::from_calendar_date(year, month, day).map_err(|_| Error::InvalidFormat)?;
+    let time = Time::from_hms(parsetwo(6)?, parsetwo(8)?, parsetwo(10)?)
+        .map_err(|_| Error::InvalidFormat)?;
 
-impl DateTime {
-    pub fn parse(s: &str) -> Result<Self> {
-        let parsetwo = |i| {
-            s.get(i..=(i + 1))
-                .and_then(|s| s.parse().ok())
-                .ok_or(Error::InvalidFormat)
-        };
+    let offset = match s.get(12..=12) {
+        Some("W") => UtcOffset::__from_hms_unchecked(1, 0, 0),
+        Some("S") => UtcOffset::__from_hms_unchecked(2, 0, 0),
+        _ => return Err(Error::InvalidFormat),
+    };
 
-        Ok(Self {
-            year: parsetwo(0)?,
-            month: parsetwo(2)?,
-            day: parsetwo(4)?,
-            hour: parsetwo(6)?,
-            minute: parsetwo(8)?,
-            second: parsetwo(10)?,
-            dst: match s.get(12..=12) {
-                Some("W") => false,
-                Some("S") => true,
-                _ => return Err(Error::InvalidFormat),
-            },
-        })
-    }
+    Ok(PrimitiveDateTime::new(date, time).assume_offset(offset))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -225,25 +226,28 @@ impl<const I: u8, const F: u8> Debug for Decimal<I, F> {
 
 #[cfg(test)]
 mod tests {
-    use crate::obis::{DateTime, Power};
+    use time::macros::datetime;
 
-    use super::{Decimal, Direction, Object};
+    use super::{parse_datetime, Decimal, Direction, Object, Power};
 
     #[test]
-    fn datetime() {
-        let date = "0-0:1.0.0(221022162844S)".parse::<Object>().unwrap();
-
+    fn datetime_obj() {
         assert_eq!(
-            date,
-            Object::DateTime(DateTime {
-                year: 22,
-                month: 10,
-                day: 22,
-                hour: 16,
-                minute: 28,
-                second: 44,
-                dst: true
-            })
+            "0-0:1.0.0(221022162844W)".parse::<Object>().unwrap(),
+            Object::DateTime(datetime!(2022-10-22 15:28:44 UTC))
+        );
+    }
+
+    #[test]
+    fn datetime_parsing() {
+        assert!(parse_datetime("9999999999W").is_err());
+        assert!(parse_datetime("aaaaaa").is_err());
+        assert!(parse_datetime("220717231648").is_err()); // missing dst indicator
+
+        // spec says dst shouldn't be used, but it never hurts to overdo timezones
+        assert_eq!(
+            parse_datetime("220717231648S").unwrap(),
+            datetime!(2022-07-17 21:16:48 UTC)
         );
     }
 
