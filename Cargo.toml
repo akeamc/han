@@ -7,3 +7,4 @@ license = "MIT"
 
 [dependencies]
 crc16 = "0.4.0"
+serde = { version = "1.0.147", default-features = false, features = ["derive"], optional = true }

@@ -1,6 +1,6 @@
 use core::str::FromStr;
 
-use crate::{obis::Object, Error, Result};
+use crate::{obis::Object, state::State, Error, Result};
 
 pub struct Reader<I>
 where
@@ -59,7 +59,7 @@ where
 }
 
 pub struct Readout {
-    buffer: [u8; 2048],
+    pub buffer: [u8; 2048],
 }
 
 impl Readout {
@@ -98,6 +98,10 @@ pub struct Telegram<'a> {
 impl<'a> Telegram<'a> {
     pub fn objects(&self) -> impl Iterator<Item = Result<Object>> + 'a {
         self.object_buffer.lines().map(Object::from_str)
+    }
+
+    pub fn to_state(&self) -> Result<State> {
+        State::from_telegram(self)
     }
 }
 

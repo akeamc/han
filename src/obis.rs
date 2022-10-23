@@ -5,13 +5,13 @@ use crate::{Error, Result};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Line {
-    Line1 = 0,
-    Line2 = 1,
-    Line3 = 2,
+    L1,
+    L2,
+    L3,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum ActiveReactive {
+pub enum Power {
     /// kW
     Active,
     /// kvar
@@ -24,17 +24,17 @@ pub enum Direction {
     FromGrid,
 }
 
-use ActiveReactive::*;
 use Direction::*;
+use Power::*;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Object {
     DateTime(DateTime),
     /// Total energy (kWh or kvarh)
-    TotalEnergy(ActiveReactive, Direction, Decimal<8, 3>),
+    TotalEnergy(Power, Direction, Decimal<8, 3>),
     /// Power of all lines combined (kW or kvar)
-    TotalPower(ActiveReactive, Direction, Decimal<4, 3>),
-    Power(Line, ActiveReactive, Direction, Decimal<4, 3>),
+    TotalPower(Power, Direction, Decimal<4, 3>),
+    Power(Line, Power, Direction, Decimal<4, 3>),
     Voltage(Line, Decimal<3, 1>),
     Current(Line, Decimal<3, 1>),
 }
@@ -77,8 +77,8 @@ fn p<const I: u8, const F: u8>(s: &str) -> Result<Decimal<I, F>, Error> {
     scalar.parse()
 }
 
-/// Determine if the value specified is active or reactive, as well as the [`Direction`].
-fn typ_dir(v: u8) -> Result<(ActiveReactive, Direction)> {
+/// Determine if the power specified is active or reactive, as well as the [`Direction`].
+fn pow_dir(v: u8) -> Result<(Power, Direction)> {
     match v {
         1 => Ok((Active, FromGrid)),
         2 => Ok((Active, ToGrid)),
@@ -98,28 +98,28 @@ impl FromStr for Object {
         match obis {
             Obis(0, 0, 1, 0, 0) => Ok(Object::DateTime(DateTime::parse(body)?)),
             Obis(1, 0, c @ 1..=4, d @ 7..=8, 0) => {
-                let (typ, dir) = typ_dir(c)?;
+                let (pow, dir) = pow_dir(c)?;
                 match d {
-                    7 => Ok(Object::TotalPower(typ, dir, p(body)?)),
-                    8 => Ok(Object::TotalEnergy(typ, dir, p(body)?)),
+                    7 => Ok(Object::TotalPower(pow, dir, p(body)?)),
+                    8 => Ok(Object::TotalEnergy(pow, dir, p(body)?)),
                     _ => unreachable!(),
                 }
             }
             Obis(1, 0, c @ 21..=24 | c @ 41..=44 | c @ 61..=64, 7, 0) => {
                 let line = match c / 20 {
-                    1 => Line::Line1,
-                    2 => Line::Line2,
-                    3 => Line::Line3,
+                    1 => Line::L1,
+                    2 => Line::L2,
+                    3 => Line::L3,
                     _ => unreachable!(),
                 };
-                let (typ, dir) = typ_dir(c % 20)?;
-                Ok(Object::Power(line, typ, dir, p(body)?))
+                let (pow, dir) = pow_dir(c % 20)?;
+                Ok(Object::Power(line, pow, dir, p(body)?))
             }
             Obis(1, 0, c @ 31..=32 | c @ 51..=52 | c @ 71..=72, 7, 0) => {
                 let line = match c {
-                    31..=32 => Line::Line1,
-                    51..=52 => Line::Line2,
-                    71..=72 => Line::Line3,
+                    31..=32 => Line::L1,
+                    51..=52 => Line::L2,
+                    71..=72 => Line::L3,
                     _ => unreachable!(),
                 };
 
@@ -134,7 +134,8 @@ impl FromStr for Object {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct DateTime {
     pub year: u8,
     pub month: u8,
@@ -224,7 +225,7 @@ impl<const I: u8, const F: u8> Debug for Decimal<I, F> {
 
 #[cfg(test)]
 mod tests {
-    use crate::obis::{ActiveReactive, DateTime};
+    use crate::obis::{DateTime, Power};
 
     use super::{Decimal, Direction, Object};
 
@@ -252,11 +253,7 @@ mod tests {
 
         assert_eq!(
             reading,
-            Object::TotalEnergy(
-                ActiveReactive::Active,
-                Direction::FromGrid,
-                Decimal(6136930)
-            )
+            Object::TotalEnergy(Power::Active, Direction::FromGrid, Decimal(6136930))
         );
     }
 
