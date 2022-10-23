@@ -3,45 +3,81 @@ use core::str::FromStr;
 
 use crate::{Error, Result};
 
+/// One conductor in a three-phase system.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Line {
+    /// Line 1
     L1,
+    /// Line 2
     L2,
+    /// Line 3
     L3,
 }
 
+/// The type of power measured (*active* or *reactive*).
+///
+/// [Wikipedia](https://en.wikipedia.org/wiki/AC_power#Active,_reactive,_apparent,_and_complex_power_in_sinusoidal_steady-state)
 #[derive(Debug, PartialEq, Eq)]
 pub enum Power {
-    /// kW
+    /// Active power ([W](https://en.wikipedia.org/wiki/Watt)).
     Active,
-    /// kvar
+    /// Reactive power ([VAr](https://en.wikipedia.org/wiki/Volt-ampere#Reactive)).
     Reactive,
 }
 
+/// Direction of the electricity flow.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Direction {
-    ToGrid,
+    /// Energy received from the grid.
     FromGrid,
+    /// Energy returned to the grid.
+    ToGrid,
 }
 
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use Direction::*;
 use Power::*;
 
+/// A parsed line of the body of a [`Telegram`](crate::Telegram).
+///
+/// ```
+/// use core::str::FromStr;
+/// use han::{Object, Power, Direction};
+///
+/// // 1-0:3.8.0 specifies the received reactive energy.
+/// let obj = "1-0:3.8.0(00000008.909*kvarh)".parse::<Object>()?;
+/// assert_eq!(
+///     obj,
+///     Object::Energy(
+///         Power::Reactive,
+///         Direction::FromGrid,
+///         8909, // VAr    
+///     ),
+/// );
+/// # Ok::<(), han::Error>(())
+/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub enum Object {
+    /// Timestamp with the correct timezone (CET/CEST[^dst]).
+    ///
+    /// [^dst]: According to the Swedish specification, only CET is ever used.
+    ///     This library supports both, however.
     DateTime(OffsetDateTime),
-    /// Total energy (kWh or kvarh)
-    TotalEnergy(Power, Direction, Decimal<8, 3>),
-    /// Power of all lines combined (kW or kvar)
-    TotalPower(Power, Direction, Decimal<4, 3>),
-    Power(Line, Power, Direction, Decimal<4, 3>),
-    Voltage(Line, Decimal<3, 1>),
-    Current(Line, Decimal<3, 1>),
+    /// Energy received or returned across all [`Line`]s (Wh or VArh).
+    Energy(Power, Direction, u32),
+    /// Power of all lines combined (W or VAr).
+    TotalPower(Power, Direction, u32),
+    /// Power per [`Line`] (W or VAr).
+    Power(Line, Power, Direction, u32),
+    /// Phase voltage per [`Line`] measured in decivolts (dV, 0.1 V).
+    Voltage(Line, u16),
+    /// Phase current per [`Line`] (dA, 0.1 A).
+    Current(Line, u16),
 }
 
+/// An *OBject Identifier System* identifier with the F group omitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Obis(u8, u8, u8, u8, u8);
+pub struct Obis(pub u8, pub u8, pub u8, pub u8, pub u8);
 
 impl Display for Obis {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -51,7 +87,7 @@ impl Display for Obis {
 }
 
 impl Obis {
-    pub fn parse(s: &str) -> Option<Self> {
+    fn from_str_opt(s: &str) -> Option<Self> {
         let (a, s) = s.split_once('-')?;
         let a = a.parse().ok()?;
         let (b, s) = s.split_once(':')?;
@@ -66,21 +102,42 @@ impl FromStr for Obis {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Obis::parse(s).ok_or(Error::InvalidFormat)
+        Obis::from_str_opt(s).ok_or(Error::InvalidFormat)
     }
 }
 
-fn p<const I: u8, const F: u8>(s: &str) -> Result<Decimal<I, F>, Error> {
-    let end = s.len().checked_sub(1).ok_or(Error::InvalidFormat)?;
-    let inner = s.get(..end).ok_or(Error::InvalidFormat)?; // s has a trailing parenthesis
-    let (scalar, _unit) = inner.split_once('*').ok_or(Error::InvalidFormat)?;
+/// Get the scalar and the unit from a value with a trailing parenthesis.
+fn split_value(s: &str) -> Option<(&str, &str)> {
+    let end = s.len().checked_sub(1)?; // s has a trailing parenthesis
+    let inner = s.get(..end)?;
+    inner.split_once('*')
+}
 
-    scalar.parse()
+fn parse_decimal<const F: u8>(s: &str) -> Option<u32> {
+    let (decimal, _unit) = split_value(s)?;
+    let (i, f) = decimal.rsplit_once('.')?;
+    if f.len() != F.into() {
+        return None;
+    }
+    let i: u32 = i.parse().ok()?;
+    let f: u32 = f.parse().ok()?;
+
+    i.checked_mul(10u32.pow(F.into()))?.checked_add(f)
+}
+
+fn parse_kilo(s: &str) -> Result<u32, Error> {
+    parse_decimal::<3>(s).ok_or(Error::InvalidFormat)
+}
+
+fn parse_deci(s: &str) -> Result<u16, Error> {
+    parse_decimal::<1>(s)
+        .and_then(|v| v.try_into().ok())
+        .ok_or(Error::InvalidFormat)
 }
 
 /// Determine if the power specified is active or reactive, as well as the [`Direction`].
-fn pow_dir(v: u8) -> Result<(Power, Direction)> {
-    match v {
+fn pow_dir(a: u8) -> Result<(Power, Direction)> {
+    match a {
         1 => Ok((Active, FromGrid)),
         2 => Ok((Active, ToGrid)),
         3 => Ok((Reactive, FromGrid)),
@@ -101,8 +158,8 @@ impl FromStr for Object {
             Obis(1, 0, c @ 1..=4, d @ 7..=8, 0) => {
                 let (pow, dir) = pow_dir(c)?;
                 match d {
-                    7 => Ok(Object::TotalPower(pow, dir, p(body)?)),
-                    8 => Ok(Object::TotalEnergy(pow, dir, p(body)?)),
+                    7 => Ok(Object::TotalPower(pow, dir, parse_kilo(body)?)),
+                    8 => Ok(Object::Energy(pow, dir, parse_kilo(body)?)),
                     _ => unreachable!(),
                 }
             }
@@ -114,7 +171,7 @@ impl FromStr for Object {
                     _ => unreachable!(),
                 };
                 let (pow, dir) = pow_dir(c % 20)?;
-                Ok(Object::Power(line, pow, dir, p(body)?))
+                Ok(Object::Power(line, pow, dir, parse_kilo(body)?))
             }
             Obis(1, 0, c @ 31..=32 | c @ 51..=52 | c @ 71..=72, 7, 0) => {
                 let line = match c {
@@ -125,8 +182,8 @@ impl FromStr for Object {
                 };
 
                 match c % 10 {
-                    1 => Ok(Object::Current(line, p(body)?)),
-                    2 => Ok(Object::Voltage(line, p(body)?)),
+                    1 => Ok(Object::Current(line, parse_deci(body)?)),
+                    2 => Ok(Object::Voltage(line, parse_deci(body)?)),
                     _ => unreachable!(),
                 }
             }
@@ -172,63 +229,13 @@ fn parse_datetime(s: &str) -> Result<OffsetDateTime> {
     Ok(PrimitiveDateTime::new(date, time).assume_offset(offset))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Decimal<const I: u8, const F: u8>(u32); // up to 9 digits in base 10
-
-impl<const I: u8, const F: u8> FromStr for Decimal<I, F> {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (i, f) = s.split_once('.').ok_or(Error::InvalidFormat)?;
-
-        if i.len() != I.into() || f.len() != F.into() {
-            return Err(Error::InvalidFormat);
-        }
-        let i: u32 = i.parse().map_err(|_| Error::InvalidFormat)?;
-        let f: u32 = f.parse().map_err(|_| Error::InvalidFormat)?;
-
-        Ok(Self(
-            i.checked_mul(10u32.pow(F.into()))
-                .ok_or(Error::InvalidFormat)?
-                + f,
-        ))
-    }
-}
-
-impl<const I: u8, const F: u8> From<Decimal<I, F>> for f64 {
-    fn from(n: Decimal<I, F>) -> Self {
-        f64::from(n.0) / f64::from(10u32.pow(F.into()))
-    }
-}
-
-impl<const I: u8, const F: u8> Decimal<I, F> {
-    pub fn fraction(&self) -> u32 {
-        self.0 % 10u32.pow(F.into())
-    }
-
-    pub fn integer(&self) -> u32 {
-        (self.0 - self.fraction()) / 10u32.pow(F.into())
-    }
-}
-
-impl<const I: u8, const F: u8> Debug for Decimal<I, F> {
-    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let (i, f): (usize, usize) = (I.into(), F.into());
-        fmt.debug_tuple("Decimal")
-            .field(&format_args!(
-                "{:0<i$}.{:0>f$}",
-                self.integer(),
-                self.fraction()
-            ))
-            .finish()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use time::macros::datetime;
 
-    use super::{parse_datetime, Decimal, Direction, Object, Power};
+    use crate::Line;
+
+    use super::{parse_datetime, Direction, Object, Power};
 
     #[test]
     fn datetime_obj() {
@@ -252,23 +259,15 @@ mod tests {
     }
 
     #[test]
-    fn reading() {
-        let reading = "1-0:1.8.0(00006136.930*kWh)".parse::<Object>().unwrap();
+    fn parse() {
+        assert_eq!(
+            "1-0:1.8.0(00006136.930*kWh)".parse::<Object>().unwrap(),
+            Object::Energy(Power::Active, Direction::FromGrid, 6136930)
+        );
 
         assert_eq!(
-            reading,
-            Object::TotalEnergy(Power::Active, Direction::FromGrid, Decimal(6136930))
+            "1-0:72.7.0(235.5*V)".parse::<Object>().unwrap(),
+            Object::Voltage(Line::L3, 2355)
         );
-    }
-
-    #[test]
-    fn num() {
-        assert_eq!(
-            "0123.456".parse::<Decimal::<4, 3>>().unwrap(),
-            Decimal(123456)
-        );
-        assert!("0.585".parse::<Decimal::<3, 3>>().is_err()); // wrong number of decimals
-
-        assert_eq!(f64::from(Decimal::<3, 3>(146195)), 146.195);
     }
 }
