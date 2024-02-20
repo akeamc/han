@@ -221,8 +221,8 @@ fn parse_datetime(s: &str) -> Result<OffsetDateTime> {
         .map_err(|_| Error::InvalidFormat)?;
 
     let offset = match s.get(12..=12) {
-        Some("W") => UtcOffset::__from_hms_unchecked(1, 0, 0),
-        Some("S") => UtcOffset::__from_hms_unchecked(2, 0, 0),
+        Some("W") => UtcOffset::from_hms(1, 0, 0).unwrap(),
+        Some("S") => UtcOffset::from_hms(2, 0, 0).unwrap(),
         _ => return Err(Error::InvalidFormat),
     };
 

@@ -1,4 +1,6 @@
 use core::str::FromStr;
+#[cfg(feature = "embedded-io-async")]
+use embedded_io_async::BufRead;
 
 use crate::{obis::Object, Error, Result};
 
@@ -60,10 +62,122 @@ where
     }
 }
 
+#[cfg(feature = "embedded-io-async")]
+#[derive(Debug)]
+struct Buffer {
+    data: [u8; 2048],
+    pos: usize,
+    len: Option<usize>,
+}
+
+#[cfg(feature = "embedded-io-async")]
+impl Buffer {
+    const fn new() -> Self {
+        Self {
+            data: [0; 2048],
+            pos: 0,
+            len: None,
+        }
+    }
+}
+
+/// A parser for the raw UART output of a power meter.
+#[cfg(feature = "embedded-io-async")]
+pub struct AsyncReader<R> {
+    reader: R,
+    buffer: Option<Buffer>,
+}
+
+#[cfg(feature = "embedded-io-async")]
+async fn scan_to_next<R>(reader: &mut R) -> Result<Option<Buffer>, R::Error>
+where
+    R: BufRead,
+{
+    loop {
+        let buf = reader.fill_buf().await?;
+        let n = buf.len();
+        if n == 0 {
+            return Ok(None);
+        }
+
+        if let Some(start) = buf.iter().position(|b| *b == b'/') {
+            reader.consume(start);
+            return Ok(Some(Buffer::new()));
+        } else {
+            reader.consume(n);
+        }
+    }
+}
+
+#[cfg(feature = "embedded-io-async")]
+impl<R> AsyncReader<R>
+where
+    R: BufRead,
+{
+    /// Construct a new AsyncReader from a byte reader.
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            buffer: None,
+        }
+    }
+
+    /// Read the next readout from the reader.
+    ///
+    /// This function is cancel-safe.
+    pub async fn next_readout(&mut self) -> Result<Option<Readout>, R::Error> {
+        loop {
+            match self.buffer {
+                Some(ref mut buffer) => 'fill_buf: loop {
+                    let buf = self.reader.fill_buf().await?;
+                    let n = buf.len();
+
+                    if n == 0 {
+                        return Ok(None);
+                    }
+
+                    for (i, &b) in buf.iter().enumerate() {
+                        if buffer.pos >= buffer.data.len() {
+                            self.reader.consume(i);
+                            self.buffer = None;
+                            break 'fill_buf; // buffer overflow
+                        }
+
+                        buffer.data[buffer.pos] = b;
+
+                        if buffer.len.is_some_and(|len| buffer.pos >= len) {
+                            self.reader.consume(i);
+                            let readout = Readout {
+                                buffer: buffer.data,
+                            };
+                            self.buffer = None;
+                            return Ok(Some(readout));
+                        }
+
+                        // end of telegram 4 bytes after the '!'
+                        if b == b'!' {
+                            buffer.len = Some(buffer.pos + 4);
+                        }
+
+                        buffer.pos += 1;
+                    }
+
+                    self.reader.consume(n);
+                },
+                None => match scan_to_next(&mut self.reader).await? {
+                    Some(buffer) => {
+                        self.buffer = Some(buffer);
+                    }
+                    None => return Ok(None),
+                },
+            }
+        }
+    }
+}
+
 /// A single readout.
 pub struct Readout {
-    /// The underlying buffer.
-    pub buffer: [u8; 2048],
+    pub(crate) buffer: [u8; 2048],
 }
 
 impl Readout {
@@ -133,5 +247,24 @@ mod tests {
         }
 
         assert!(reader.next().is_none());
+    }
+
+    #[cfg(feature = "embedded-io-async")]
+    #[tokio::test]
+    async fn ellevio_async() {
+        let bytes = include_bytes!("../test/ell.txt");
+        let mut reader = super::AsyncReader::new(&bytes[..]);
+        let readout = reader.next_readout().await.unwrap().unwrap();
+        let telegram = readout.to_telegram().unwrap();
+
+        assert_eq!(telegram.checksum, 0x9ab5);
+        assert_eq!(telegram.flag_id, "ELL");
+        assert_eq!(telegram.identification, "\\253833635_A");
+
+        for obj in telegram.objects() {
+            obj.unwrap();
+        }
+
+        assert!(reader.next_readout().await.unwrap().is_none());
     }
 }

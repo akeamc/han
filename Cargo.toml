@@ -1,6 +1,6 @@
 [package]
 name = "han"
-version = "0.1.1"
+version = "0.2.0-alpha.0"
 edition = "2021"
 description = "No-std implementation of the Swedish-Norwegian, P1-based smart power meter standard"
 license = "MIT"
@@ -8,8 +8,22 @@ categories = ["parser-implementations", "no-std"]
 keywords = ["uart", "h1", "han"]
 
 [dependencies]
-crc16 = "0.4.0"
-time = { version = "0.3.15", default-features = false, features = [
+crc16 = "0.4"
+defmt = { version = "0.3", optional = true }
+embedded-io-async = { version = "0.6", optional = true }
+time = { version = "0.3", default-features = false, features = [
   "parsing",
   "macros",
 ] }
+
+[features]
+defmt-03 = ["dep:defmt"]
+embedded-io-async = ["dep:embedded-io-async"]
+std = ["embedded-io-async/std"]
+
+[dev-dependencies]
+tokio = { version = "1.36.0", features = ["macros", "rt"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

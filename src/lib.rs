@@ -2,7 +2,8 @@
 //! called HAN or H1 (the latter was already registered on crates.io).
 
 #![warn(missing_docs)]
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 mod obis;
 mod read;
